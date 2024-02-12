@@ -11,7 +11,7 @@ const socketServer = (app) => {
     },
   });
 
-  io.on("connection", (socket, id) => {
+  io.on("connection", (socket) => {
     console.log("a user connected");
 
     socket.on("joinRoom", (room) => {
@@ -19,22 +19,31 @@ const socketServer = (app) => {
       console.log(`Socket joined room: ${room}`);
     });
 
-    socket.on("message", async (msg, id) => {
-      console.log(msg, id);
-      // Store the message in Redis
-      await redisClient.rpush(`messages:${id}`, msg);
-      io.to(id).emit("message", msg);
+    socket.on("message", async (msg, room) => {
+      console.log(msg, room);
+      // store the message in Redis
+      const messageToStore = typeof msg === "object" ? JSON.stringify(msg) : msg;
+      await redisClient.rpush(`messages:${room}`, messageToStore);
+
+      // Emit the message only to the sender to avoid duplicates
+      socket.emit("message", msg);
+
+      // Emit the message to everyone in the room except the sender
+      socket.to(room).emit("message", msg);
     });
 
-    socket.on("getMessages", async (id) => {
-      console.log("getMessages", id);
-      // Retrieve messages from Redis
-      redisClient.lrange(`messages:${id}`, 0, -1, (err, messages) => {
+    socket.on("getMessages", async (room) => {
+      console.log("getMessages", room);
+      // retrieve messages from Redis
+      redisClient.lrange(`messages:${room}`, 0, -1, (err, messages) => {
+        console.log("messages", messages);
         if (err) {
           console.error("Error fetching messages from Redis:", err);
           return;
         }
-        io.to(id).emit("messages", messages);
+        const parsedMessages = messages.map((message) => JSON.parse(message));
+        // Emit the messages to the requesting client
+        socket.emit("messages", parsedMessages);
       });
     });
   });
