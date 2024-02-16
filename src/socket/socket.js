@@ -1,6 +1,7 @@
 /* eslint-disable no-console */
-import { Server } from "socket.io";
 import http from "http";
+import crypto from "crypto";
+import { Server } from "socket.io";
 
 // redis
 import redisClient from "../config/redis.js";
@@ -9,7 +10,11 @@ import redisSub from "../config/redisSub.js";
 // mysql
 import { poolPromise } from "../config/db.js";
 
-// create socket server
+// encrypt/decrypt
+const algo = "aes-256-cbc";
+const encryptionSecret = process.env.ENCRYPTION_SECRET;
+
+// SOCKET SERVER
 const socketServer = (app) => {
   const server = http.createServer(app);
   const io = new Server(server, {
@@ -24,7 +29,37 @@ const socketServer = (app) => {
   // subscribe to 'messages' channel
   redisSubscriber.subscribe("messages");
 
+  // ENCRYPT FUNCTION
+  const encrypt = (text) => {
+    const IV_LENGTH = 16;
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv(algo, Buffer.from(encryptionSecret), iv);
+    const encrypted = Buffer.concat([cipher.update(text), cipher.final()]);
+
+    return iv.toString("hex") + ":" + encrypted.toString("hex");
+  };
+
+  // DECRYPT FUNCTION
+  const decrypt = (text) => {
+    const [iv, encryptedText] = text.split(":");
+
+    const decipher = crypto.createDecipheriv(
+      algo,
+      Buffer.from(encryptionSecret),
+      Buffer.from(iv, "hex"),
+    );
+
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(encryptedText, "hex")),
+      decipher.final(),
+    ]);
+
+    return decrypted.toString();
+  };
+
+  // SOCKET CONNECTION
   io.on("connection", (socket) => {
+    // HANDLE ROOM
     socket.on("joinRoom", async (room) => {
       socket.join(room);
 
@@ -45,13 +80,18 @@ const socketServer = (app) => {
       }
     });
 
+    // HANDLE MESSAGES
     socket.on("message", async (msg, room) => {
-      // store the message in Redis
       const messageToStore = { ...msg, room };
-      await redisClient.rpush(`messages:${room}`, JSON.stringify(messageToStore));
+
+      // encrypt message
+      const encryptedMessage = encrypt(JSON.stringify(messageToStore));
+
+      // store the message in Redis
+      await redisClient.rpush(`messages:${room}`, encryptedMessage);
 
       // publish to 'messages' channel
-      redisClient.publish("messages", JSON.stringify(messageToStore));
+      redisClient.publish("messages", encryptedMessage);
 
       // emit message to the sender to avoid duplicates
       socket.emit("message", msg);
@@ -60,8 +100,8 @@ const socketServer = (app) => {
       socket.to(room).emit("message", msg);
     });
 
+    // RETRIEVE MESSAGES
     socket.on("getMessages", async (room) => {
-      // retrieve messages from Redis
       try {
         let messages = [];
         let cursor = "0";
@@ -85,7 +125,11 @@ const socketServer = (app) => {
           // fetch messages associated with each key
           for (const key of keys) {
             const keyMessages = await redisClient.lrange(key, 0, -1);
-            messages = messages.concat(keyMessages.map((message) => JSON.parse(message)));
+
+            // decrypt and parse message
+            messages = messages.concat(
+              keyMessages.map((message) => JSON.parse(decrypt(message))),
+            );
           }
         } while (cursor !== "0");
 
@@ -97,20 +141,16 @@ const socketServer = (app) => {
     });
   });
 
-  // handle incoming messages from 'messages' channel
+  // HANDLE INCOMING MESSAGES FROM REDIS 'MESSAGES' CHANNEL
   redisSubscriber.on("message", async (channel, message) => {
-    const parsedMessage = JSON.parse(message);
+    // decrypt and parse message
+    const parsedMessage = JSON.parse(decrypt(message));
 
     if (parsedMessage && parsedMessage.sender) {
       // store message in db
       const [rows] = await poolPromise.execute(
-        "INSERT INTO message (createdAt, message, user_name, user_id, room_id) VALUES (NOW(), ?, ?, ?, ?)",
-        [
-          parsedMessage.message,
-          parsedMessage.sender.name,
-          parsedMessage.sender.id,
-          parsedMessage.room,
-        ],
+        "INSERT INTO message (createdAt, message, user_id, room_id) VALUES (NOW(), ?, ?, ?)",
+        [encrypt(parsedMessage.message), parsedMessage.sender.id, parsedMessage.room],
       );
 
       console.log("Inserted message:", rows.insertId);
