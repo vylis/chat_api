@@ -62,17 +62,38 @@ const socketServer = (app) => {
 
     socket.on("getMessages", async (room) => {
       // retrieve messages from Redis
-      redisClient.lrange(`messages:${room}`, 0, -1, (err, messages) => {
-        if (err) {
-          console.error("Error fetching messages from Redis:", err);
-          return;
-        }
+      try {
+        let messages = [];
+        let cursor = "0";
 
-        const parsedMessages = messages.map((message) => JSON.parse(message));
+        // pattern to match keys
+        const pattern = `messages:${room}`;
+
+        do {
+          // scan keys matching pattern messages:room
+          const [nextCursor, keys] = await redisClient.scan(
+            cursor,
+            "MATCH",
+            pattern,
+            "COUNT",
+            "100",
+          );
+
+          // update cursor for the next iteration
+          cursor = nextCursor;
+
+          // fetch messages associated with each key
+          for (const key of keys) {
+            const keyMessages = await redisClient.lrange(key, 0, -1);
+            messages = messages.concat(keyMessages.map((message) => JSON.parse(message)));
+          }
+        } while (cursor !== "0");
 
         // emit messages to client
-        socket.emit("messages", parsedMessages);
-      });
+        socket.emit("messages", messages);
+      } catch (err) {
+        console.error("Error fetching messages:", err);
+      }
     });
   });
 
