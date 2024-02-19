@@ -42,7 +42,7 @@ const socketServer = (app) => {
           "INSERT INTO room (name, created_at, is_active, owner_id) VALUES (?, NOW(), 1, ?)";
         const [rows] = await poolPromise.execute(sql, [room.name, user]);
 
-        console.log("Inserted room:", rows.insertId);
+        console.log("Created room:", rows.insertId);
       }
     });
 
@@ -58,7 +58,7 @@ const socketServer = (app) => {
       const sql = "UPDATE room SET is_active = 0 WHERE room_id = ?";
       const [rows] = await poolPromise.execute(sql, [room.id]);
 
-      console.log("Closing room:", rows.affectedRows);
+      console.log("Closed room:", rows.affectedRows);
     });
 
     // HANDLE MESSAGES
@@ -123,14 +123,33 @@ const socketServer = (app) => {
 
     // HANDLE MESSAGE READ
     socket.on("messageRead", async (message, user) => {
-      // get user type
+      // get user type from existing message
+      const message_user_type =
+        message.sender.type === "doctor" ? "user_id" : "patient_user_id";
+
+      // get message id from db and add 1 hour to date to match db timezone utc
+      const date = new Date(message.createdAt);
+      date.setHours(date.getHours() + 1);
+      const created_at = date.toISOString().slice(0, 19).replace("T", " ");
+
+      const selectSql = `SELECT id FROM message WHERE created_at = ? AND ${message_user_type} = ? and room_id = ?`;
+      const [selectedRows] = await poolPromise.execute(selectSql, [
+        created_at,
+        message.sender.id,
+        message.room,
+      ]);
+      const message_id = selectedRows[0].id;
+
+      // get user type from reading user
       const user_type = user.type === "doctor" ? "user_id" : "patient_user_id";
 
       //update message in db
-      const sql = `UPDATE message SET is_read = 1 WHERE message_id = ? AND ${user_type} = ?`;
-      const [rows] = await poolPromise.execute(sql, [message, user.sender.id]);
+      const sql = `UPDATE message SET is_read = 1, ${user_type} = ?, updated_at = NOW() WHERE id = ? AND is_read = 0`;
+      const [rows] = await poolPromise.execute(sql, [user.id, message_id]);
 
-      console.log("Message read:", rows.affectedRows);
+      if (rows.affectedRows > 0) {
+        console.log("Updated message:", rows.affectedRows);
+      }
     });
   });
 
