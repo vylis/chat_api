@@ -1,6 +1,5 @@
 /* eslint-disable no-console */
 import http from "http";
-import crypto from "crypto";
 import { Server } from "socket.io";
 
 // redis
@@ -10,9 +9,8 @@ import redisSub from "../config/redisSub.js";
 // mysql
 import { poolPromise } from "../config/db.js";
 
-// encrypt/decrypt
-const algo = "aes-256-cbc";
-const encryptionSecret = process.env.ENCRYPTION_SECRET;
+// encrypt
+import { encrypt, decrypt } from "./encrypt.js";
 
 // SOCKET SERVER
 const socketServer = (app) => {
@@ -29,55 +27,39 @@ const socketServer = (app) => {
   // subscribe to 'messages' channel
   redisSubscriber.subscribe("messages");
 
-  // ENCRYPT FUNCTION
-  const encrypt = (text) => {
-    const IV_LENGTH = 16;
-    const iv = crypto.randomBytes(IV_LENGTH);
-    const cipher = crypto.createCipheriv(algo, Buffer.from(encryptionSecret), iv);
-    const encrypted = Buffer.concat([cipher.update(text), cipher.final()]);
-
-    return iv.toString("hex") + ":" + encrypted.toString("hex");
-  };
-
-  // DECRYPT FUNCTION
-  const decrypt = (text) => {
-    const [iv, encryptedText] = text.split(":");
-
-    const decipher = crypto.createDecipheriv(
-      algo,
-      Buffer.from(encryptionSecret),
-      Buffer.from(iv, "hex"),
-    );
-
-    const decrypted = Buffer.concat([
-      decipher.update(Buffer.from(encryptedText, "hex")),
-      decipher.final(),
-    ]);
-
-    return decrypted.toString();
-  };
-
   // SOCKET CONNECTION
   io.on("connection", (socket) => {
-    // HANDLE ROOM
-    socket.on("joinRoom", async (room) => {
-      socket.join(room);
-
+    // HANDLE ROOM CREATION
+    socket.on("createRoom", async (room, user) => {
+      // only usable by doctors/operators from TLS dashboard
       // check if room exists in db
-      const [existingRoom] = await poolPromise.execute(
-        "SELECT * FROM room WHERE name = ?",
-        [room],
-      );
+      const sql = "SELECT * FROM user WHERE user_id = ?";
+      const [existingRoom] = await poolPromise.execute(sql, [room.id]);
 
       // if it doesn't exist insert room in db
       if (existingRoom.length === 0) {
-        const [rows] = await poolPromise.execute(
-          "INSERT INTO room (name, createdAt) VALUES (?, NOW())",
-          [room],
-        );
+        const sql =
+          "INSERT INTO room (name, created_at, is_active, owner_id) VALUES (?, NOW(), 1, ?)";
+        const [rows] = await poolPromise.execute(sql, [room.name, user]);
 
         console.log("Inserted room:", rows.insertId);
       }
+    });
+
+    // HANDLE ROOM JOIN
+    socket.on("joinRoom", async (room) => {
+      socket.join(room);
+    });
+
+    // HANDLE ROOM CLOSING
+    socket.on("closeRoom", async (room) => {
+      // only usable by doctors/operators from TLS dashboard
+
+      // update room in db
+      const sql = "UPDATE room SET is_active = 0 WHERE room_id = ?";
+      const [rows] = await poolPromise.execute(sql, [room.id]);
+
+      console.log("Closing room:", rows.affectedRows);
     });
 
     // HANDLE MESSAGES
@@ -139,6 +121,18 @@ const socketServer = (app) => {
         console.error("Error fetching messages:", err);
       }
     });
+
+    // HANDLE MESSAGE READ
+    socket.on("messageRead", async (message, user) => {
+      // get user type
+      const user_type = user.type === "doctor" ? "user_id" : "patient_user_id";
+
+      //update message in db
+      const sql = `UPDATE message SET is_read = 1 WHERE message_id = ? AND ${user_type} = ?`;
+      const [rows] = await poolPromise.execute(sql, [message, user.sender.id]);
+
+      console.log("Message read:", rows.affectedRows);
+    });
   });
 
   // HANDLE INCOMING MESSAGES FROM REDIS 'MESSAGES' CHANNEL
@@ -146,12 +140,18 @@ const socketServer = (app) => {
     // decrypt and parse message
     const parsedMessage = JSON.parse(decrypt(message));
 
+    // get user type
+    const user_type =
+      parsedMessage.sender.type === "doctor" ? "user_id" : "patient_user_id";
+
     if (parsedMessage && parsedMessage.sender) {
       // store message in db
-      const [rows] = await poolPromise.execute(
-        "INSERT INTO message (createdAt, message, user_id, room_id) VALUES (NOW(), ?, ?, ?)",
-        [encrypt(parsedMessage.message), parsedMessage.sender.id, parsedMessage.room],
-      );
+      const sql = `INSERT INTO message (message, created_at, ${user_type}, room_id, is_read) VALUES (?, NOW(), ?, ?, 0)`;
+      const [rows] = await poolPromise.execute(sql, [
+        encrypt(parsedMessage.message),
+        parsedMessage.sender.id,
+        parsedMessage.room,
+      ]);
 
       console.log("Inserted message:", rows.insertId);
     } else {
