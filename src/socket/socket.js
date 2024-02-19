@@ -31,7 +31,7 @@ const socketServer = (app) => {
   io.on("connection", (socket) => {
     // HANDLE ROOM CREATION
     socket.on("createRoom", async (room, user) => {
-      // only usable by doctors/operators from TLS dashboard
+      // only usable by doctors/operators
       // check if room exists in db
       const sql = "SELECT * FROM user WHERE user_id = ?";
       const [existingRoom] = await poolPromise.execute(sql, [room.id]);
@@ -54,7 +54,6 @@ const socketServer = (app) => {
     // HANDLE ROOM CLOSING
     socket.on("closeRoom", async (room) => {
       // only usable by doctors/operators from TLS dashboard
-
       // update room in db
       const sql = "UPDATE room SET is_active = 0 WHERE room_id = ?";
       const [rows] = await poolPromise.execute(sql, [room.id]);
