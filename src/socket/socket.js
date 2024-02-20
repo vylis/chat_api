@@ -40,9 +40,7 @@ const socketServer = (app) => {
       if (existingRoom.length === 0) {
         const sql =
           "INSERT INTO room (name, created_at, is_active, owner_id) VALUES (?, NOW(), 1, ?)";
-        const [rows] = await poolPromise.execute(sql, [room.name, user]);
-
-        console.log("Created room:", rows.insertId);
+        await poolPromise.execute(sql, [room.name, user]);
       }
     });
 
@@ -56,9 +54,7 @@ const socketServer = (app) => {
       // only usable by doctors/operators from TLS dashboard
       // update room in db
       const sql = "UPDATE room SET is_active = 0 WHERE room_id = ?";
-      const [rows] = await poolPromise.execute(sql, [room.id]);
-
-      console.log("Closed room:", rows.affectedRows);
+      await poolPromise.execute(sql, [room.id]);
     });
 
     // HANDLE MESSAGES
@@ -122,9 +118,9 @@ const socketServer = (app) => {
     });
 
     // HANDLE MESSAGE READ
-    socket.on("messageRead", async (message, user) => {
+    socket.on("messageRead", async (message, user, room) => {
       // get user type from existing message
-      const message_user_type =
+      const sender_user_type =
         message.sender.type === "doctor" ? "user_id" : "patient_user_id";
 
       // get message id from db and add 1 hour to date to match db timezone utc
@@ -132,23 +128,23 @@ const socketServer = (app) => {
       date.setHours(date.getHours() + 1);
       const created_at = date.toISOString().slice(0, 19).replace("T", " ");
 
-      const selectSql = `SELECT id FROM message WHERE created_at = ? AND ${message_user_type} = ? and room_id = ?`;
+      const selectSql = `SELECT * FROM message WHERE created_at = ? AND ${sender_user_type} = ? AND room_id = ? AND is_read = 0`;
       const [selectedRows] = await poolPromise.execute(selectSql, [
         created_at,
         message.sender.id,
-        message.room,
+        room,
       ]);
-      const message_id = selectedRows[0].id;
 
-      // get user type from reading user
-      const user_type = user.type === "doctor" ? "user_id" : "patient_user_id";
+      // // get user type from receiver user
+      const receiver_type = user.type === "doctor" ? "user_id" : "patient_user_id";
 
-      //update message in db
-      const sql = `UPDATE message SET is_read = 1, ${user_type} = ?, updated_at = NOW() WHERE id = ? AND is_read = 0`;
-      const [rows] = await poolPromise.execute(sql, [user.id, message_id]);
-
-      if (rows.affectedRows > 0) {
-        console.log("Updated message:", rows.affectedRows);
+      for (const row of selectedRows) {
+        if (user.id !== message.sender.id && row.is_read === 0) {
+          const messageId = row.id;
+          const sql = `UPDATE message SET is_read = 1, ${receiver_type} = ?, updated_at = NOW() WHERE id = ? AND is_read = 0`;
+          const [rows] = await poolPromise.execute(sql, [user.id, messageId]);
+          console.log("rows", rows.affectedRows);
+        }
       }
     });
   });
@@ -165,13 +161,11 @@ const socketServer = (app) => {
     if (parsedMessage && parsedMessage.sender) {
       // store message in db
       const sql = `INSERT INTO message (message, created_at, ${user_type}, room_id, is_read) VALUES (?, NOW(), ?, ?, 0)`;
-      const [rows] = await poolPromise.execute(sql, [
+      await poolPromise.execute(sql, [
         encrypt(parsedMessage.message),
         parsedMessage.sender.id,
         parsedMessage.room,
       ]);
-
-      console.log("Inserted message:", rows.insertId);
     } else {
       console.error("Invalid message format:", parsedMessage);
     }
