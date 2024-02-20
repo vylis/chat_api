@@ -142,8 +142,7 @@ const socketServer = (app) => {
         if (user.id !== message.sender.id && row.is_read === 0) {
           const messageId = row.id;
           const sql = `UPDATE message SET is_read = 1, ${receiver_type} = ?, updated_at = NOW() WHERE id = ? AND is_read = 0`;
-          const [rows] = await poolPromise.execute(sql, [user.id, messageId]);
-          console.log("rows", rows.affectedRows);
+          await poolPromise.execute(sql, [user.id, messageId]);
         }
       }
     });
