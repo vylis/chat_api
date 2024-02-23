@@ -12,7 +12,13 @@
 npm i
 ```
 
-5. run the server
+5. run docker for mysql and redis
+
+```bash
+make docker-start
+```
+
+6. run the server
 
 ```bash
 npm start
